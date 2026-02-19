@@ -13,6 +13,6 @@ export interface Expense {
   id: string;
   amount: number;
   category: Category;
-  note?: string;
+  note: string;
   createdAt: string; // ISO string
 }
