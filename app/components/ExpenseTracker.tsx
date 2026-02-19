@@ -1,17 +1,22 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { getExpenses, addExpense, updateExpense, deleteExpense } from "@/lib/storage";
+import { getExpenses, addExpense, updateExpense, deleteExpense, importExpenses, exportToCSV } from "@/lib/storage";
+import { parseCSV } from "@/lib/csv";
 import type { Expense, Category } from "@/lib/types";
 import { CATEGORIES } from "@/lib/types";
 
 const CATEGORY_LABELS: Record<Category, string> = {
   food: "Food",
-  transportation: "Transport",
-  shopping: "Shopping",
-  necessities: "Necessities",
+  entertainment: "Entertainment",
+  transportation: "Transportation",
   groceries: "Groceries",
+  shopping: "Shopping",
   others: "Others",
+  sports: "Sports",
+  necessities: "Necessities",
+  travelling: "Travelling",
+  sasha: "Sasha",
 };
 
 function formatAmount(amount: number): string {
@@ -69,6 +74,156 @@ function groupExpensesByDay(expenses: Expense[]): { dateKey: string; label: stri
   });
 }
 
+type Period = "day" | "week" | "month";
+
+function getPeriodKey(iso: string, period: Period): string {
+  const d = new Date(iso);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  if (period === "day") return `${y}-${m}-${day}`;
+  if (period === "month") return `${y}-${m}`;
+  const start = new Date(d);
+  start.setDate(d.getDate() - d.getDay());
+  const sy = start.getFullYear();
+  const sm = String(start.getMonth() + 1).padStart(2, "0");
+  const sd = String(start.getDate()).padStart(2, "0");
+  return `${sy}-${sm}-${sd}`;
+}
+
+function groupByPeriod(
+  expenses: Expense[],
+  period: Period
+): { key: string; label: string; total: number; byCategory: Record<Category, number> }[] {
+  const byKey = new Map<string, { total: number; byCategory: Record<Category, number> }>();
+  const catZero = Object.fromEntries(CATEGORIES.map((c) => [c, 0])) as Record<Category, number>;
+
+  for (const ex of expenses) {
+    const key = getPeriodKey(ex.createdAt, period);
+    if (!byKey.has(key)) byKey.set(key, { total: 0, byCategory: { ...catZero } });
+    const entry = byKey.get(key)!;
+    entry.total += ex.amount;
+    entry.byCategory[ex.category] = (entry.byCategory[ex.category] ?? 0) + ex.amount;
+  }
+
+  const keys = Array.from(byKey.keys()).sort((a, b) => b.localeCompare(a));
+  return keys.slice(0, 14).map((key) => {
+    const { total, byCategory } = byKey.get(key)!;
+    let label = key;
+    if (period === "day") label = getDayLabel(key);
+    else if (period === "week") {
+      const [y, m, d] = key.split("-").map(Number);
+      const start = new Date(y, m - 1, d);
+      const end = new Date(start);
+      end.setDate(end.getDate() + 6);
+      label = `${start.toLocaleDateString(undefined, { month: "short", day: "numeric" })} – ${end.toLocaleDateString(undefined, { month: "short", day: "numeric" })}`;
+    } else label = new Date(key + "-01").toLocaleDateString(undefined, { month: "short", year: "numeric" });
+    return { key, label, total, byCategory };
+  });
+}
+
+const CATEGORY_COLORS: Record<Category, string> = {
+  food: "bg-amber-500",
+  entertainment: "bg-pink-500",
+  transportation: "bg-blue-500",
+  groceries: "bg-teal-500",
+  shopping: "bg-violet-500",
+  others: "bg-zinc-400",
+  sports: "bg-lime-500",
+  necessities: "bg-emerald-600",
+  travelling: "bg-cyan-500",
+  sasha: "bg-rose-400",
+};
+
+function SummaryView({ expenses }: { expenses: Expense[] }) {
+  const [period, setPeriod] = useState<Period>("day");
+  const groups = groupByPeriod(expenses, period);
+  const totalAll = expenses.reduce((s, e) => s + e.amount, 0);
+  const byCat = CATEGORIES.reduce((acc, c) => {
+    acc[c] = expenses.filter((e) => e.category === c).reduce((s, e) => s + e.amount, 0);
+    return acc;
+  }, {} as Record<Category, number>);
+
+  return (
+    <div className="space-y-6">
+      <div className="rounded-2xl bg-zinc-100 p-4 dark:bg-zinc-800/50">
+        <p className="text-xs text-zinc-500 dark:text-zinc-400">Total spent</p>
+        <p className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">{formatAmount(totalAll)}</p>
+        <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
+          {expenses.length} expense{expenses.length !== 1 ? "s" : ""}
+        </p>
+      </div>
+
+      <div>
+        <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400 mb-2">Group by</p>
+        <div className="flex gap-2">
+          {(["day", "week", "month"] as const).map((p) => (
+            <button
+              key={p}
+              type="button"
+              onClick={() => setPeriod(p)}
+              className={`rounded-xl px-4 py-2 text-sm font-medium capitalize ${
+                period === p ? "bg-emerald-500 text-white" : "bg-zinc-200 text-zinc-600 dark:bg-zinc-700 dark:text-zinc-300"
+              }`}
+            >
+              {p}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {groups.length === 0 ? (
+        <p className="text-sm text-zinc-500">No data for this period.</p>
+      ) : (
+        <div className="space-y-4">
+          <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400">Stacked bar</p>
+          <div className="space-y-3">
+            {groups.map(({ key, label, total, byCategory }) => (
+              <div key={key} className="flex flex-col gap-1">
+                <div className="flex justify-between text-xs">
+                  <span className="text-zinc-600 dark:text-zinc-400 truncate max-w-[60%]">{label}</span>
+                  <span className="font-medium text-zinc-900 dark:text-zinc-100">{formatAmount(total)}</span>
+                </div>
+                <div className="h-8 w-full flex rounded-lg overflow-hidden bg-zinc-200 dark:bg-zinc-700">
+                  {CATEGORIES.filter((c) => (byCategory[c] ?? 0) > 0).map((c) => (
+                    <div
+                      key={c}
+                      className={`${CATEGORY_COLORS[c]} transition-all`}
+                      style={{
+                        width: total > 0 ? `${((byCategory[c] ?? 0) / total) * 100}%` : "0",
+                        minWidth: (byCategory[c] ?? 0) > 0 ? "4px" : "0",
+                      }}
+                      title={`${CATEGORY_LABELS[c]}: ${formatAmount(byCategory[c] ?? 0)}`}
+                    />
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="rounded-2xl border border-zinc-200 dark:border-zinc-700 p-4">
+        <p className="text-sm font-medium text-zinc-600 dark:text-zinc-400 mb-3">By category</p>
+        <div className="space-y-2">
+          {CATEGORIES.map((c) => {
+            const sum = byCat[c] ?? 0;
+            const pct = totalAll > 0 ? (sum / totalAll) * 100 : 0;
+            return (
+              <div key={c} className="flex items-center gap-2">
+                <div className={`w-3 h-3 rounded-full shrink-0 ${CATEGORY_COLORS[c]}`} />
+                <span className="text-sm text-zinc-700 dark:text-zinc-300 flex-1">{CATEGORY_LABELS[c]}</span>
+                <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{formatAmount(sum)}</span>
+                <span className="text-xs text-zinc-500 w-10 text-right">{pct.toFixed(0)}%</span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function TrackerIcon() {
   return (
     <svg
@@ -119,6 +274,12 @@ export default function ExpenseTracker() {
   const [editAmount, setEditAmount] = useState("");
   const [editCategory, setEditCategory] = useState<Category | null>(null);
   const [editNote, setEditNote] = useState("");
+  const [viewMode, setViewMode] = useState<"details" | "summary">("details");
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [importPaste, setImportPaste] = useState("");
+  const [importMessage, setImportMessage] = useState<{ type: "ok" | "err"; text: string } | null>(null);
+  const [showExport, setShowExport] = useState(false);
+  const [exportText, setExportText] = useState("");
 
   const loadExpenses = useCallback(() => {
     setExpenses(getExpenses());
@@ -173,15 +334,76 @@ export default function ExpenseTracker() {
     setTimeout(() => setJustAdded(false), 1500);
   };
 
+  const handleImport = () => {
+    setImportMessage(null);
+    const trimmed = importPaste.trim();
+    if (!trimmed) {
+      setImportMessage({ type: "err", text: "Paste CSV first." });
+      return;
+    }
+    try {
+      const rows = parseCSV(trimmed);
+      if (rows.length === 0) {
+        setImportMessage({ type: "err", text: "No valid rows. Use columns: date,category,note,amount" });
+        return;
+      }
+      const count = importExpenses(
+        rows.map((r) => ({ amount: r.amount, category: r.category, note: r.note, createdAt: r.date }))
+      );
+      loadExpenses();
+      setImportPaste("");
+      setImportMessage({ type: "ok", text: `Imported ${count} expense(s).` });
+    } catch (err) {
+      setImportMessage({ type: "err", text: err instanceof Error ? err.message : "Import failed." });
+    }
+  };
+
+  const handleExportClick = () => {
+    setExportText(exportToCSV(expenses));
+    setShowExport(true);
+  };
+
+  const copyExport = () => {
+    if (typeof navigator?.clipboard !== "undefined" && exportText) {
+      navigator.clipboard.writeText(exportText);
+    }
+  };
+
   return (
     <div className="flex min-h-dvh w-full max-w-md flex-col mx-auto safe-area-padding">
-      <header className="flex items-center gap-3 mb-8">
-        <TrackerIcon />
-        <h1 className="text-lg font-bold text-zinc-800 dark:text-zinc-100 tracking-tight">
-          Expense Tracker
-        </h1>
+      <header className="flex items-center justify-between gap-3 mb-6">
+        <div className="flex items-center gap-3 min-w-0">
+          <TrackerIcon />
+          <h1 className="text-lg font-bold text-zinc-800 dark:text-zinc-100 tracking-tight truncate">
+            Expense Tracker
+          </h1>
+        </div>
+        <div className="flex rounded-xl bg-zinc-100 p-1 dark:bg-zinc-800 shrink-0">
+          <button
+            type="button"
+            onClick={() => setViewMode("details")}
+            className={`rounded-lg px-3 py-1.5 text-sm font-medium ${
+              viewMode === "details" ? "bg-white text-zinc-900 shadow dark:bg-zinc-700 dark:text-zinc-100" : "text-zinc-600 dark:text-zinc-400"
+            }`}
+          >
+            Details
+          </button>
+          <button
+            type="button"
+            onClick={() => setViewMode("summary")}
+            className={`rounded-lg px-3 py-1.5 text-sm font-medium ${
+              viewMode === "summary" ? "bg-white text-zinc-900 shadow dark:bg-zinc-700 dark:text-zinc-100" : "text-zinc-600 dark:text-zinc-400"
+            }`}
+          >
+            Summary
+          </button>
+        </div>
       </header>
 
+      {viewMode === "summary" ? (
+        <SummaryView expenses={expenses} />
+      ) : (
+        <>
       <h2 className="text-base font-semibold text-zinc-800 dark:text-zinc-100 mb-1">
         Add expense
       </h2>
@@ -257,6 +479,79 @@ export default function ExpenseTracker() {
           {justAdded ? "Added ✓" : "Add expense"}
         </button>
       </form>
+
+      <div className="mt-4">
+        <button
+          type="button"
+          onClick={() => setMoreOpen(!moreOpen)}
+          className="flex items-center gap-2 text-sm font-medium text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100"
+        >
+          More
+          <svg className={`h-4 w-4 transition-transform ${moreOpen ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+          </svg>
+        </button>
+        {moreOpen && (
+          <div className="mt-3 rounded-xl border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-700 dark:bg-zinc-800/50 space-y-4">
+            <div>
+              <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                Import from CSV
+              </p>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1 mb-2">
+                Paste CSV with columns: date,category,note,amount
+              </p>
+              <textarea
+                value={importPaste}
+                onChange={(e) => setImportPaste(e.target.value)}
+                placeholder="date,category,note,amount&#10;2024-01-15,food,Lunch,80"
+                rows={4}
+                className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-100"
+              />
+              {importMessage && (
+                <p className={`text-sm mt-1 ${importMessage.type === "ok" ? "text-emerald-600 dark:text-emerald-400" : "text-red-600 dark:text-red-400"}`}>
+                  {importMessage.text}
+                </p>
+              )}
+              <button
+                type="button"
+                onClick={handleImport}
+                className="mt-2 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-medium text-white"
+              >
+                Parse &amp; Import
+              </button>
+            </div>
+            <div className="border-t border-zinc-200 dark:border-zinc-700 pt-4">
+              <button
+                type="button"
+                onClick={handleExportClick}
+                className="text-sm font-medium text-zinc-700 dark:text-zinc-300"
+              >
+                Export to CSV
+              </button>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1 mb-2">
+                Copy all records as CSV text.
+              </p>
+              {showExport && (
+                <>
+                  <textarea
+                    readOnly
+                    value={exportText}
+                    rows={4}
+                    className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-100"
+                  />
+                  <button
+                    type="button"
+                    onClick={copyExport}
+                    className="mt-2 rounded-lg bg-zinc-200 dark:bg-zinc-600 px-4 py-2 text-sm font-medium text-zinc-800 dark:text-zinc-200"
+                  >
+                    Copy to clipboard
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
 
       <div className="mt-8 border-t border-zinc-200 pt-6 dark:border-zinc-800">
         <h2 className="text-sm font-medium text-zinc-500 dark:text-zinc-400 mb-3">
@@ -389,6 +684,8 @@ export default function ExpenseTracker() {
           </div>
         )}
       </div>
+        </>
+      )}
     </div>
   );
 }

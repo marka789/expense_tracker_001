@@ -51,3 +51,30 @@ export function deleteExpense(id: string): boolean {
   saveExpenses(expenses);
   return true;
 }
+
+export function importExpenses(
+  items: { amount: number; category: Expense["category"]; note: string; createdAt: string }[]
+): number {
+  if (items.length === 0) return 0;
+  const existing = getExpenses();
+  const newExpenses: Expense[] = items.map((item) => ({
+    ...item,
+    id: crypto.randomUUID(),
+  }));
+  const merged = [...newExpenses, ...existing].sort(
+    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+  );
+  saveExpenses(merged);
+  return newExpenses.length;
+}
+
+export function exportToCSV(expenses: Expense[]): string {
+  const header = "date,category,note,amount";
+  const escape = (s: string) =>
+    /[,"\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  const rows = expenses.map(
+    (e) =>
+      `${e.createdAt.slice(0, 10)},${e.category},${escape(e.note ?? "")},${e.amount}`
+  );
+  return [header, ...rows].join("\n");
+}
